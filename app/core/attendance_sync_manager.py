@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import Future
 import json
 import threading
 from copy import deepcopy
@@ -47,7 +48,8 @@ class AttendanceSyncManager:
         self._settings_path = Path(__file__).resolve().parents[2] / "data" / "attendance_sync_settings.json"
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
         self._settings = self._load_settings()
-        self._manual_task: asyncio.Future | None = None
+        self._manual_task: Future | None = None
+        self._scheduled_task: Future | None = None
 
     def start(self):
         if not self._scheduler.running:
@@ -57,6 +59,8 @@ class AttendanceSyncManager:
     def stop(self):
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)
+        self._manual_task = None
+        self._scheduled_task = None
 
     def get_settings(self) -> dict:
         next_run_at = None
@@ -288,12 +292,28 @@ class AttendanceSyncManager:
         logger.info(f"打卡定时同步已启用：每天 {self._settings.time}")
 
     def _run_scheduled_job(self):
+        loop = get_app_loop()
+        if loop is None or not loop.is_running():
+            logger.warning("定时同步已跳过：应用事件循环未就绪")
+            return
+
         try:
-            asyncio.run(self.run_scheduled_sync())
+            future = asyncio.run_coroutine_threadsafe(self.run_scheduled_sync(), loop)
+            self._scheduled_task = future
+            future.add_done_callback(self._handle_scheduled_task_result)
         except RuntimeError as error:
             logger.warning(f"定时同步已跳过：{error}")
         except Exception as error:
             logger.error(f"定时同步失败：{error}")
+
+    def _handle_scheduled_task_result(self, future: Future):
+        self._scheduled_task = None
+        try:
+            future.result()
+        except RuntimeError as error:
+            logger.warning(f"定时同步已跳过：{error}")
+        except Exception as error:
+            logger.exception(f"定时同步失败：{error}")
 
     async def _load_active_device_ips(self) -> list[str]:
         async with SessionLocal() as db:

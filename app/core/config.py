@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 100
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
+    APP_RELOAD: bool = False
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_VERIFICATION_TOKEN: str = ""
