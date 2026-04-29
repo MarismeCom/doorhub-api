@@ -51,8 +51,9 @@ jobs:
       - name: Build Docker image
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG=${GITHUB_REF#refs/tags/}
             docker build \
-              -t ${{ steps.vars.outputs.image }}:${{ steps.meta.outputs.tag }} \
+              -t ${{ steps.vars.outputs.image }}:${TAG} \
               -t ${{ steps.vars.outputs.image }}:latest \
               .
           else
@@ -60,12 +61,13 @@ jobs:
               -t ${{ steps.vars.outputs.image }}:latest \
               .
           fi
-          
-      - name: Push Docker image
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            docker push ${{ steps.vars.outputs.image }}:${{ steps.meta.outputs.tag }}
-            docker push ${{ steps.vars.outputs.image }}:latest
-          else
-            docker push ${{ steps.vars.outputs.image }}:latest
-          fi
+
+- name: Push Docker image
+  run: |
+    if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+      TAG=${GITHUB_REF#refs/tags/}
+      docker push ${{ steps.vars.outputs.image }}:${TAG}
+      docker push ${{ steps.vars.outputs.image }}:latest
+    else
+      docker push ${{ steps.vars.outputs.image }}:latest
+    fi
