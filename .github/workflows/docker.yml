@@ -42,10 +42,16 @@ jobs:
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
+      - name: Set image name
+        id: vars
+        run: |
+          IMAGE_NAME=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "image=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
       - name: Build Docker image
         run: |
-          docker build -t $IMAGE_NAME:${{ steps.meta.outputs.tag }} .
+          docker build -t ${{ steps.vars.outputs.image }}:${{ steps.meta.outputs.tag }} .
 
       - name: Push Docker image
         run: |
-          docker push $IMAGE_NAME:${{ steps.meta.outputs.tag }}
+          docker push ${{ steps.vars.outputs.image }}:${{ steps.meta.outputs.tag }}
