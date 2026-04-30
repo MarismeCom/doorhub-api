@@ -5,8 +5,8 @@ from contextlib import contextmanager
 import pytest
 
 from app.models import User
-from app.schemas import UserCreate
-from app.services.user import UserService
+from app.schemas import UserCreate, UserUpdate
+from app.services.user import DuplicateUserFieldError, UserService
 from app.core.zk_client import ZKClient
 
 
@@ -35,6 +35,68 @@ async def test_create_user(db_session):
     assert user.user_id == "EMP001"
     assert user.status == "active"
     assert user.sync_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_suggest_next_user_id_uses_smallest_missing_numeric_value(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="1", name="U1", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=2, user_id="2", name="U2", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=3, user_id="4", name="U4", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=4, user_id="9988", name="ADMIN", privilege=14, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=5, user_id="EMP003", name="EMP003", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+    next_user_id = await svc.suggest_next_user_id(db_session)
+
+    assert next_user_id == "3"
+
+
+@pytest.mark.asyncio
+async def test_create_user_rejects_duplicate_name_user_id_and_card(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="EMP001", name="张三", privilege=0, password="", group_id="", card=1001, sync_status="synced"),
+            User(uid=2, user_id="EMP002", name="李四", privilege=0, password="", group_id="", card=1002, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+
+    with pytest.raises(DuplicateUserFieldError) as exc_info:
+        await svc.create_user(
+            db_session,
+            UserCreate(name="张三", user_id="EMP002", card=1002, device_ip="192.168.1.201"),
+        )
+
+    assert [item["field"] for item in exc_info.value.duplicate_fields] == ["user_id", "name", "card"]
+
+
+@pytest.mark.asyncio
+async def test_update_user_rejects_duplicate_name_and_card_from_other_user(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="EMP001", name="张三", privilege=0, password="", group_id="", card=1001, sync_status="synced"),
+            User(uid=2, user_id="EMP002", name="李四", privilege=0, password="", group_id="", card=1002, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+
+    with pytest.raises(DuplicateUserFieldError) as exc_info:
+        await svc.update_user(
+            db_session,
+            "EMP002",
+            UserUpdate(name="张三", privilege=0, password="", group_id="", card=1001),
+        )
+
+    assert [item["field"] for item in exc_info.value.duplicate_fields] == ["name", "card"]
 
 
 @pytest.mark.asyncio

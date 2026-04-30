@@ -31,6 +31,18 @@ class UserRepository:
         result = await db.execute(select(func.max(User.uid)))
         return result.scalar() or 0
 
+    async def list_all_user_ids(self, db: AsyncSession) -> list[str]:
+        result = await db.execute(select(User.user_id))
+        return [item for item in result.scalars().all() if item]
+
+    async def get_by_name(self, db: AsyncSession, name: str) -> User | None:
+        result = await db.execute(select(User).where(User.name == name))
+        return result.scalar_one_or_none()
+
+    async def get_by_card(self, db: AsyncSession, card: int) -> User | None:
+        result = await db.execute(select(User).where(User.card == card))
+        return result.scalar_one_or_none()
+
     async def list_active(
         self,
         db: AsyncSession,
