@@ -1,11 +1,19 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode_zk_time
+from app.db.base import Base
+from app.db.session import build_async_database_url
+from app.models import Attendance, AttendanceDaily, User
 from app.repositories.attendance import AttendanceRepository
+from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
 
 
@@ -56,6 +64,12 @@ def test_decode_attendance_time_uses_xface600_time_logic():
     decoded = ZKClient._decode_attendance_time(bytes.fromhex("0f16bf31"))
 
     assert decoded == datetime(2025, 12, 19, 19, 10, 7, tzinfo=DEVICE_TIMEZONE)
+
+
+def test_export_datetime_formats_use_device_local_timezone():
+    formatted = AttendanceRecordService._format_datetime(datetime(2026, 4, 28, 23, 20, 16, tzinfo=timezone.utc))
+
+    assert formatted == "2026-04-29 07:20:16"
 
 
 @pytest.mark.asyncio
@@ -172,3 +186,227 @@ async def test_exists_record_returns_true_when_duplicate_rows_already_exist():
     )
 
     assert exists_record is True
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_same_day(db_session):
+    user = User(
+        uid=68,
+        user_id="68",
+        name="徐永杰",
+        privilege=0,
+        password="",
+        group_id="",
+        card=0,
+        status="active",
+        sync_status="pending",
+    )
+    db_session.add(user)
+    db_session.add_all(
+        [
+            Attendance(
+                id=1,
+                user_id="68",
+                uid=68,
+                timestamp=datetime(2026, 4, 29, 7, 20, 16, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="7984",
+            ),
+            Attendance(
+                id=2,
+                user_id="68",
+                uid=68,
+                timestamp=datetime(2026, 4, 29, 18, 53, 56, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="8166",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    captured_records = {}
+    service.workday_provider.get_workday_map = AsyncMock(return_value={datetime(2026, 4, 29).date(): True})
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db, start_date, end_date
+        captured_records[user_id] = records
+
+    service.repository.replace_records = fake_replace_records
+    await service.ensure_monthly_records(db_session, "2026-04", user_id="68")
+
+    daily = next(item for item in captured_records["68"] if item.attend_date == datetime(2026, 4, 29).date())
+
+    assert daily.actual_checkin == datetime(2026, 4, 29, 7, 20, 16, tzinfo=DEVICE_TIMEZONE)
+    assert daily.actual_checkout == datetime(2026, 4, 29, 18, 53, 56, tzinfo=DEVICE_TIMEZONE)
+    assert daily.work_minutes == 693
+    assert daily.overtime_minutes == 53
+    assert daily.status == 1
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_marks_weekend_records_as_overtime(db_session):
+    user = User(
+        uid=69,
+        user_id="69",
+        name="Weekend Test",
+        privilege=0,
+        password="",
+        group_id="",
+        card=0,
+        status="active",
+        sync_status="pending",
+    )
+    db_session.add(user)
+    db_session.add_all(
+        [
+            Attendance(
+                id=11,
+                user_id="69",
+                uid=69,
+                timestamp=datetime(2026, 3, 14, 8, 7, 34, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="7984",
+            ),
+            Attendance(
+                id=12,
+                user_id="69",
+                uid=69,
+                timestamp=datetime(2026, 3, 14, 18, 58, 40, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="8166",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    captured_records = {}
+    service.workday_provider.get_workday_map = AsyncMock(return_value={datetime(2026, 3, 14).date(): False})
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db, start_date, end_date
+        captured_records[user_id] = records
+
+    service.repository.replace_records = fake_replace_records
+    await service.ensure_monthly_records(db_session, "2026-03", user_id="69")
+
+    daily = next(item for item in captured_records["69"] if item.attend_date == datetime(2026, 3, 14).date())
+
+    assert daily.actual_checkin == datetime(2026, 3, 14, 8, 7, 34, tzinfo=DEVICE_TIMEZONE)
+    assert daily.actual_checkout == datetime(2026, 3, 14, 18, 58, 40, tzinfo=DEVICE_TIMEZONE)
+    assert daily.work_minutes == 651
+    assert daily.overtime_minutes == 651
+    assert daily.status == 7
+
+
+@pytest.mark.asyncio
+async def test_export_monthly_csv_includes_overtime_status_and_duration_for_weekend_records(db_session):
+    service = AttendanceRecordService()
+    service.ensure_monthly_records = AsyncMock()
+    service.repository.list_all_records = AsyncMock(
+        return_value=[
+            {
+                "attend_date": datetime(2026, 3, 14).date(),
+                "user_id": "70",
+                "user_name": "Export Weekend",
+                "plan_start": "10:00",
+                "plan_end": "18:00",
+                "actual_checkin": datetime(2026, 3, 14, 8, 7, 34, tzinfo=DEVICE_TIMEZONE),
+                "actual_checkout": datetime(2026, 3, 14, 18, 58, 40, tzinfo=DEVICE_TIMEZONE),
+                "late_minutes": 0,
+                "early_minutes": 0,
+                "work_minutes": 651,
+                "overtime_minutes": 651,
+                "status": 7,
+            }
+        ]
+    )
+    service.holiday_repository.list_by_range = AsyncMock(return_value=[])
+
+    content = await service.export_monthly_csv(db_session, "2026-03", keyword="70")
+    csv_text = content.decode("utf-8-sig")
+
+    assert "加班" in csv_text
+    assert "651" in csv_text
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_same_day_postgres():
+    settings = get_settings()
+    if not settings.DATABASE_URL.startswith("postgresql://") and not settings.DATABASE_URL.startswith("postgresql+asyncpg://"):
+        pytest.skip("当前 DATABASE_URL 不是 PostgreSQL，跳过 PostgreSQL 集成测试")
+
+    engine = create_async_engine(build_async_database_url(settings.DATABASE_URL), pool_pre_ping=True, echo=False)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+
+    test_uid = 900000 + int(uuid4().int % 100000)
+    test_user_id = f"tz-test-{uuid4().hex[:8]}"
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with session_factory() as session:
+            session.add(
+                User(
+                    uid=test_uid,
+                    user_id=test_user_id,
+                    name="TZ Test",
+                    privilege=0,
+                    password="",
+                    group_id="",
+                    card=0,
+                    status="active",
+                    sync_status="pending",
+                )
+            )
+            session.add_all(
+                [
+                    Attendance(
+                        user_id=test_user_id,
+                        uid=test_uid,
+                        timestamp=datetime(2026, 4, 29, 7, 20, 16, tzinfo=DEVICE_TIMEZONE),
+                        status=15,
+                        punch=0,
+                        device_sn="7984",
+                    ),
+                    Attendance(
+                        user_id=test_user_id,
+                        uid=test_uid,
+                        timestamp=datetime(2026, 4, 29, 18, 53, 56, tzinfo=DEVICE_TIMEZONE),
+                        status=15,
+                        punch=0,
+                        device_sn="8166",
+                    ),
+                ]
+            )
+            await session.commit()
+
+            service = AttendanceRecordService()
+            await service.ensure_monthly_records(session, "2026-04", user_id=test_user_id)
+
+            result = await session.execute(
+                select(AttendanceDaily).where(
+                    AttendanceDaily.user_id == test_user_id,
+                    AttendanceDaily.attend_date == datetime(2026, 4, 29).date(),
+                )
+            )
+            daily = result.scalar_one()
+
+            assert daily.actual_checkin == datetime(2026, 4, 29, 7, 20, 16, tzinfo=DEVICE_TIMEZONE)
+            assert daily.actual_checkout == datetime(2026, 4, 29, 18, 53, 56, tzinfo=DEVICE_TIMEZONE)
+            assert daily.work_minutes == 693
+            assert daily.overtime_minutes == 53
+            assert daily.status == 1
+
+            await session.execute(AttendanceDaily.__table__.delete().where(AttendanceDaily.user_id == test_user_id))
+            await session.execute(Attendance.__table__.delete().where(Attendance.user_id == test_user_id))
+            await session.execute(User.__table__.delete().where(User.user_id == test_user_id))
+            await session.commit()
+    finally:
+        await engine.dispose()

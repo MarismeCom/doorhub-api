@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
     APP_RELOAD: bool = False
+    APP_TIMEZONE: str = "Asia/Shanghai"
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_VERIFICATION_TOKEN: str = ""
@@ -34,6 +35,12 @@ class Settings(BaseSettings):
     FEISHU_BOT_MENU_DEVICE_EVENT_MAP: str = ""
     FEISHU_BOT_MENU_ALLOWED_OPEN_IDS: str = ""
     FEISHU_BOT_MENU_ALLOWED_USER_IDS: str = ""
+    ATTENDANCE_PLAN_START: str = "09:00"
+    ATTENDANCE_PLAN_END: str = "18:00"
+    ATTENDANCE_WORKDAY_PROVIDER: str = "ailcc"
+    ATTENDANCE_WORKDAY_API_URL: str = ""
+    ATTENDANCE_AILCC_API_BASE_URL: str = "https://holiday.ailcc.com"
+    ATTENDANCE_AILCC_API_TOKEN: str = ""
 
 
 @lru_cache

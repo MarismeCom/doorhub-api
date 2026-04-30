@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.api.v1 import (
+    attendance_records_router,
     attendances_router,
     auth_router,
     dashboard_router,
@@ -19,6 +20,7 @@ from app.api.v1 import (
 )
 from app.core.attendance_sync_manager import attendance_sync_manager
 from app.core.config import get_settings
+from app.core.holiday_cache_manager import holiday_cache_manager
 from app.core.runtime import set_app_loop
 from app.core.security import ensure_bootstrap_admin
 from app.db.base import Base
@@ -49,10 +51,12 @@ async def lifespan(app: FastAPI):
         await ensure_bootstrap_admin(db)
 
     attendance_sync_manager.start()
+    holiday_cache_manager.start()
     feishu_longconn_manager.start()
 
     yield
     feishu_longconn_manager.stop()
+    holiday_cache_manager.stop()
     attendance_sync_manager.stop()
     set_app_loop(None)
     logger.info("门禁系统关闭...")
@@ -82,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(system_users_router)
     app.include_router(users_router)
     app.include_router(attendances_router)
+    app.include_router(attendance_records_router)
     app.include_router(door_router)
     app.include_router(devices_router)
     app.include_router(feishu_router)
