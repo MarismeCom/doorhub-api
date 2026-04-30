@@ -6,12 +6,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.runtime import get_app_loop
 from app.db.session import SessionLocal
 from app.models import Device
@@ -27,7 +29,9 @@ class AttendanceSyncSettings:
 
 class AttendanceSyncManager:
     def __init__(self):
-        self._scheduler = BackgroundScheduler()
+        settings = get_settings()
+        self._timezone = ZoneInfo(settings.APP_TIMEZONE)
+        self._scheduler = BackgroundScheduler(timezone=self._timezone)
         self._service = AttendanceService()
         self._state_lock = threading.Lock()
         self._running = False
@@ -72,6 +76,7 @@ class AttendanceSyncManager:
             "time": self._settings.time,
             "device_ips": list(self._settings.device_ips or []),
             "next_run_at": next_run_at,
+            "timezone": str(self._timezone),
         }
 
     def update_settings(self, enabled: bool, time_value: str, device_ips: list[str] | None = None) -> dict:
@@ -285,11 +290,11 @@ class AttendanceSyncManager:
         hour, minute = [int(part) for part in self._settings.time.split(":", 1)]
         self._scheduler.add_job(
             self._run_scheduled_job,
-            CronTrigger(hour=hour, minute=minute),
+            CronTrigger(hour=hour, minute=minute, timezone=self._timezone),
             id=job_id,
             replace_existing=True,
         )
-        logger.info(f"打卡定时同步已启用：每天 {self._settings.time}")
+        logger.info(f"打卡定时同步已启用：每天 {self._settings.time} ({self._timezone})")
 
     def _run_scheduled_job(self):
         loop = get_app_loop()

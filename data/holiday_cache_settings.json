@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "frequency": "daily",
+  "time": "03:00",
+  "weekday": 1
+}

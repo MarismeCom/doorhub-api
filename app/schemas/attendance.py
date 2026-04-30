@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -71,3 +71,79 @@ class HealthCheckResponse(BaseModel):
     status: str
     checks: dict
     uptime_seconds: int
+
+
+class AttendanceDailyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: str
+    user_name: Optional[str] = None
+    attend_date: date
+    plan_start: Optional[str] = None
+    plan_end: Optional[str] = None
+    actual_checkin: Optional[datetime] = None
+    actual_checkout: Optional[datetime] = None
+    late_minutes: int = 0
+    early_minutes: int = 0
+    work_minutes: int = 0
+    overtime_minutes: int = 0
+    status: int
+    is_workday: bool = True
+    calc_time: Optional[datetime] = None
+
+
+class AttendanceDailyListResponse(BaseModel):
+    total: int
+    page: int = 1
+    page_size: int = 20
+    records: list[AttendanceDailyResponse]
+
+
+class AttendanceMonthlySummaryResponse(BaseModel):
+    year_month: str
+    workday_count: int = 0
+    attendance_days: int = 0
+    overtime_days: int = 0
+    late_count: int = 0
+    early_count: int = 0
+    absence_count: int = 0
+    missing_count: int = 0
+    total_work_minutes: int = 0
+    total_overtime_minutes: int = 0
+
+
+class AttendanceRecalculateRequest(BaseModel):
+    year_month: str
+    user_id: Optional[str] = None
+
+
+class HolidayCacheRefreshRequest(BaseModel):
+    year: int
+
+
+class HolidayCacheScheduleUpdate(BaseModel):
+    enabled: bool
+    frequency: str = "daily"
+    time: str
+    weekday: int = 1
+
+
+class HolidayCacheScheduleResponse(BaseModel):
+    enabled: bool = False
+    frequency: str = "daily"
+    time: str = "03:00"
+    weekday: int = 1
+    next_run_at: str | None = None
+    timezone: str | None = None
+
+
+class HolidayCacheStatusResponse(BaseModel):
+    running: bool = False
+    stage: str = "idle"
+    message: str = ""
+    source: str | None = None
+    year: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    refreshed_count: int = 0
