@@ -11,7 +11,8 @@ from app.core.config import get_settings
 from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode_zk_time
 from app.db.base import Base
 from app.db.session import build_async_database_url
-from app.models import Attendance, AttendanceDaily, User
+from app.core.attendance_sync_manager import AttendanceSyncManager
+from app.models import Attendance, AttendanceDaily, AttendanceSyncSetting, User
 from app.repositories.attendance import AttendanceRepository
 from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
@@ -70,6 +71,41 @@ def test_export_datetime_formats_use_device_local_timezone():
     formatted = AttendanceRecordService._format_datetime(datetime(2026, 4, 28, 23, 20, 16, tzinfo=timezone.utc))
 
     assert formatted == "2026-04-29 07:20:16"
+
+
+@pytest.mark.asyncio
+async def test_attendance_sync_manager_initializes_settings_from_database(monkeypatch, db_session):
+    setting = AttendanceSyncSetting(id=1, enabled=True, time="08:20")
+    setting.device_ips = ["172.30.25.103"]
+    db_session.add(setting)
+    await db_session.commit()
+
+    session_factory = async_sessionmaker(bind=db_session.bind, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    monkeypatch.setattr("app.core.attendance_sync_manager.SessionLocal", session_factory)
+
+    manager = AttendanceSyncManager()
+    await manager.initialize()
+
+    assert manager.get_settings()["enabled"] is True
+    assert manager.get_settings()["time"] == "08:20"
+    assert manager.get_settings()["device_ips"] == ["172.30.25.103"]
+
+
+@pytest.mark.asyncio
+async def test_attendance_sync_manager_persists_settings_to_database(monkeypatch, db_session):
+    session_factory = async_sessionmaker(bind=db_session.bind, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    monkeypatch.setattr("app.core.attendance_sync_manager.SessionLocal", session_factory)
+
+    manager = AttendanceSyncManager()
+    await manager.initialize()
+    await manager.update_settings(enabled=True, time_value="09:15", device_ips=["192.168.1.201"])
+
+    saved = await db_session.get(AttendanceSyncSetting, 1)
+
+    assert saved is not None
+    assert saved.enabled is True
+    assert saved.time == "09:15"
+    assert saved.device_ips == ["192.168.1.201"]
 
 
 @pytest.mark.asyncio

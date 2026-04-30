@@ -173,6 +173,56 @@ async def test_overwrite_local_updates_different_users(mock_get_users, db_sessio
 
 @pytest.mark.asyncio
 @patch("app.services.user.ZKClient.get_users")
+async def test_overwrite_local_marks_zero_card_user_as_disabled(mock_get_users, db_session):
+    db_session.add(User(uid=12, user_id="EMP012", name="原用户", privilege=0, password="7777", group_id="1", card=8888, status="active", sync_status="failed"))
+    await db_session.commit()
+
+    mock_get_users.return_value = [device_user(uid=12, user_id="EMP012", name="原用户", card=0, password="9999", group_id="1")]
+
+    svc = UserService()
+    result = await svc.sync_users_from_device(db_session, "192.168.1.201", "overwrite_local")
+    updated = await svc.repository.get_by_user_id(db_session, "EMP012")
+
+    assert result["updated_count"] == 1
+    assert updated.status == "disabled"
+    assert updated.sync_status == "synced_disabled"
+    assert updated.password == ""
+    assert updated.card == 0
+
+
+@pytest.mark.asyncio
+@patch("app.services.user.ZKClient.get_users")
+async def test_write_missing_marks_zero_card_user_as_disabled(mock_get_users, db_session):
+    mock_get_users.return_value = [device_user(uid=13, user_id="EMP013", name="设备用户", card=0, password="3333")]
+
+    svc = UserService()
+    result = await svc.sync_users_from_device(db_session, "192.168.1.201", "write_missing")
+    inserted = await svc.repository.get_by_user_id(db_session, "EMP013")
+
+    assert result["inserted_count"] == 1
+    assert inserted is not None
+    assert inserted.status == "disabled"
+    assert inserted.sync_status == "synced_disabled"
+    assert inserted.password == ""
+    assert inserted.card == 0
+
+
+@pytest.mark.asyncio
+async def test_get_users_normalizes_synced_zero_card_user_to_disabled(db_session):
+    db_session.add(User(uid=14, user_id="EMP014", name="本地旧数据", privilege=0, password="1234", group_id="", card=0, status="active", sync_status="synced"))
+    await db_session.commit()
+
+    svc = UserService()
+    users, _ = await svc.get_users(db_session, page=1, page_size=20)
+    normalized = next(user for user in users if user.user_id == "EMP014")
+
+    assert normalized.status == "disabled"
+    assert normalized.sync_status == "synced_disabled"
+    assert normalized.password == ""
+
+
+@pytest.mark.asyncio
+@patch("app.services.user.ZKClient.get_users")
 @patch("app.services.user.ZKClient.save_user")
 async def test_sync_user_to_device_verifies_single_user_after_save(mock_save_user, mock_get_users, db_session):
     db_session.add(User(uid=9, user_id="EMP009", name="王五", privilege=14, password="1234", group_id="1", card=5678, sync_status="pending"))
@@ -229,6 +279,8 @@ async def test_disable_user_clears_password_and_card_on_device(mock_save_user, m
     assert result["status"] == "success"
     assert "离职同步成功" in result["message"]
     assert updated.sync_status == "synced_disabled"
+    assert updated.password == ""
+    assert updated.card == 0
     mock_save_user.assert_called_once_with(11, "停用用户", 0, "", "2", "EMP011", 0)
 
 

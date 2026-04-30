@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI):
         await ensure_bootstrap_admin(db)
         await device_svc.ensure_configured_devices(db)
 
+    await attendance_sync_manager.initialize()
     attendance_sync_manager.start()
     holiday_cache_manager.start()
     feishu_longconn_manager.start()
