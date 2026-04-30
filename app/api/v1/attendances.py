@@ -75,5 +75,5 @@ async def update_sync_settings(data: AttendanceSyncScheduleUpdate):
     except ValueError:
         raise HTTPException(status_code=400, detail={"code": 2002, "message": "时间格式必须为 HH:mm"})
 
-    settings = attendance_sync_manager.update_settings(enabled=data.enabled, time_value=data.time, device_ips=data.device_ips)
+    settings = await attendance_sync_manager.update_settings(enabled=data.enabled, time_value=data.time, device_ips=data.device_ips)
     return ApiResponse(message="定时同步配置已更新", data=settings)

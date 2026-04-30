@@ -31,7 +31,7 @@ class UserService:
         sort_field: str | None = None,
         sort_order: str = "desc",
     ) -> tuple[list[User], int]:
-        return await self.repository.list_active(
+        users, total = await self.repository.list_active(
             db,
             page=page,
             page_size=page_size,
@@ -39,6 +39,12 @@ class UserService:
             sort_field=sort_field,
             sort_order=sort_order,
         )
+        changed = False
+        for user in users:
+            changed = self._apply_synced_card_state(user) or changed
+        if changed:
+            await db.commit()
+        return users, total
 
     async def suggest_next_user_id(self, db: AsyncSession) -> str:
         user_ids = await self.repository.list_all_user_ids(db)
@@ -152,6 +158,8 @@ class UserService:
                     await db.commit()
                     return verification
 
+                user.password = ""
+                user.card = 0
                 user.sync_status = "synced_disabled"
                 user.sync_error = None
                 await db.commit()
@@ -255,6 +263,7 @@ class UserService:
                         sync_error=None,
                         deleted_at=None,
                     )
+                    self._apply_synced_card_state(user, mark_synced=True)
                     db.add(user)
                     inserted_count += 1
                     local_by_uid[user.uid] = user
@@ -275,10 +284,9 @@ class UserService:
             if mode == "overwrite_local":
                 for field in self.SYNCABLE_FIELDS:
                     setattr(local_user, field, device_user[field])
-                local_user.status = "active"
                 local_user.deleted_at = None
-                local_user.sync_status = "synced"
                 local_user.sync_error = None
+                self._apply_synced_card_state(local_user, mark_synced=True)
                 updated_count += 1
             else:
                 skipped_count += 1
@@ -368,6 +376,7 @@ class UserService:
         return {"status": "success", "message": "设备停用回读校验通过"}
 
     def _serialize_local_user(self, user: User) -> dict:
+        self._apply_synced_card_state(user)
         return {
             "uid": user.uid,
             "user_id": user.user_id,
@@ -379,6 +388,36 @@ class UserService:
             "status": user.status or "active",
             "sync_status": user.sync_status,
         }
+
+    def _apply_synced_card_state(self, user: User, mark_synced: bool = False) -> bool:
+        changed = False
+        card_value = int(user.card or 0)
+
+        if card_value == 0:
+            if (user.password or "") != "":
+                user.password = ""
+                changed = True
+            if user.status != "disabled":
+                user.status = "disabled"
+                changed = True
+            if mark_synced and user.sync_status != "synced_disabled":
+                user.sync_status = "synced_disabled"
+                changed = True
+            elif user.sync_status == "synced":
+                user.sync_status = "synced_disabled"
+                changed = True
+        else:
+            if user.status == "disabled":
+                user.status = "active"
+                changed = True
+            if mark_synced and user.sync_status != "synced":
+                user.sync_status = "synced"
+                changed = True
+            elif user.sync_status == "synced_disabled":
+                user.sync_status = "synced"
+                changed = True
+
+        return changed
 
     async def _ensure_unique_fields(
         self,
