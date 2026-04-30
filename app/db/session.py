@@ -28,7 +28,11 @@ def build_sync_database_url(url: str) -> str:
 DATABASE_URL = build_async_database_url(settings.DATABASE_URL)
 SYNC_DATABASE_URL = build_sync_database_url(settings.DATABASE_URL)
 
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
+engine_kwargs = {"pool_pre_ping": True, "echo": False}
+if DATABASE_URL.startswith("postgresql+asyncpg://"):
+    engine_kwargs.update({"pool_recycle": 1800, "pool_use_lifo": True})
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 

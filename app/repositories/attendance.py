@@ -100,6 +100,22 @@ class DoorLogRepository:
 
 
 class AttendanceDailyRepository:
+    async def get_existing_user_ids(
+        self,
+        db: AsyncSession,
+        start_date: date,
+        end_date: date,
+        user_ids: list[str] | None = None,
+    ) -> set[str]:
+        statement = select(AttendanceDaily.user_id).where(
+            AttendanceDaily.attend_date >= start_date,
+            AttendanceDaily.attend_date <= end_date,
+        )
+        if user_ids:
+            statement = statement.where(AttendanceDaily.user_id.in_(user_ids))
+        result = await db.execute(statement.distinct())
+        return set(result.scalars().all())
+
     async def delete_records(
         self,
         db: AsyncSession,

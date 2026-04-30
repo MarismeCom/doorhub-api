@@ -53,7 +53,7 @@ async def get_attendance_records(
 @router.post("/recalculate", response_model=ApiResponse)
 async def recalculate_attendance_records(data: AttendanceRecalculateRequest, db: DBSessionDep):
     try:
-        await attendance_record_svc.ensure_monthly_records(db, data.year_month, user_id=data.user_id)
+        await attendance_record_svc.ensure_monthly_records(db, data.year_month, user_id=data.user_id, force=True)
         summary = await attendance_record_svc.get_monthly_summary(db, data.year_month, data.user_id, ensure=False)
         return ApiResponse(message="考勤记录已重算", data={"summary": summary.model_dump()})
     except ValueError as e:

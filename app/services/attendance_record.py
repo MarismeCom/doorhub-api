@@ -1,10 +1,12 @@
 import calendar
+import asyncio
 import csv
 import io
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+import zlib
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.zk_client import DEVICE_TIMEZONE
@@ -24,6 +26,7 @@ class AttendanceRecordService:
         self.plan_start = self._parse_time(settings.ATTENDANCE_PLAN_START, default=time(hour=9, minute=0))
         self.plan_end = self._parse_time(settings.ATTENDANCE_PLAN_END, default=time(hour=18, minute=0))
         self.workday_provider = build_workday_provider()
+        self._ensure_locks: dict[str, asyncio.Lock] = {}
 
     def parse_year_month(self, year_month: str) -> tuple[date, date]:
         try:
@@ -39,18 +42,30 @@ class AttendanceRecordService:
         year_month: str,
         keyword: str | None = None,
         user_id: str | None = None,
+        force: bool = False,
+    ) -> None:
+        lock_key = f"{year_month}:{user_id or keyword or '__all__'}"
+        lock = self._ensure_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            await self._acquire_generation_lock(db, lock_key)
+            await self._ensure_monthly_records_inner(db, year_month, keyword=keyword, user_id=user_id, force=force)
+
+    async def _acquire_generation_lock(self, db: AsyncSession, lock_key: str) -> None:
+        bind = db.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return
+        advisory_key = zlib.crc32(lock_key.encode("utf-8"))
+        await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": advisory_key})
+
+    async def _ensure_monthly_records_inner(
+        self,
+        db: AsyncSession,
+        year_month: str,
+        keyword: str | None = None,
+        user_id: str | None = None,
+        force: bool = False,
     ) -> None:
         start_date, end_date = self.parse_year_month(year_month)
-
-        users_query = select(User).where(User.deleted_at.is_(None))
-        if user_id:
-            users_query = users_query.where(User.user_id == user_id)
-        if keyword:
-            like_keyword = f"%{keyword.strip()}%"
-            users_query = users_query.where((User.user_id.ilike(like_keyword)) | (User.name.ilike(like_keyword)))
-        users = list((await db.execute(users_query.order_by(User.user_id.asc()))).scalars().all())
-        if not users:
-            return
 
         timestamps_start = datetime.combine(start_date, time.min, tzinfo=DEVICE_TIMEZONE)
         timestamps_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=DEVICE_TIMEZONE)
@@ -60,17 +75,32 @@ class AttendanceRecordService:
         )
         if user_id:
             attendance_query = attendance_query.where(Attendance.user_id == user_id)
+        if keyword:
+            like_keyword = f"%{keyword.strip()}%"
+            attendance_query = attendance_query.where(Attendance.user_id.ilike(like_keyword))
         attendance_query = attendance_query.order_by(Attendance.user_id.asc(), Attendance.timestamp.asc())
         attendance_rows = list((await db.execute(attendance_query)).scalars().all())
 
         if not attendance_rows:
-            await self.repository.delete_records(
-                db,
-                [user.user_id for user in users],
-                start_date,
-                end_date,
-            )
-            await db.commit()
+            if force and user_id:
+                await self.repository.delete_records(db, [user_id], start_date, end_date)
+                await db.commit()
+            return
+
+        raw_user_ids = sorted({row.user_id for row in attendance_rows})
+        target_user_ids = raw_user_ids
+        if not force:
+            existing_user_ids = await self.repository.get_existing_user_ids(db, start_date, end_date, raw_user_ids)
+            target_user_ids = [item for item in raw_user_ids if item not in existing_user_ids]
+            if not target_user_ids:
+                return
+
+        users_query = select(User).where(
+            User.deleted_at.is_(None),
+            User.user_id.in_(target_user_ids),
+        )
+        users = list((await db.execute(users_query.order_by(User.user_id.asc()))).scalars().all())
+        if not users:
             return
 
         workday_map = await self.workday_provider.get_workday_map(db, start_date, end_date)
