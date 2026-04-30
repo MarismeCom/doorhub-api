@@ -2,7 +2,7 @@
 
 DoorHub API 是基于 FastAPI、PostgreSQL 和 ZKTeco 设备协议的门禁管理后端，负责系统登录、门禁用户、设备管理、打卡记录、远程开门、飞书事件接入和后台同步任务。
 
-详细文档已整理到 GitHub Wiki 结构，见 [wiki/Home.md](wiki/Home.md)。
+详细文档已整理到 GitHub Wiki 结构，见 [wiki/Home.md](https://github.com/MarismeCom/doorhub-api/wiki)。
 
 ## 支持设备
 
@@ -152,4 +152,4 @@ docker run -d --name doorhub-api -p 8000:8000 --env-file .env doorhub-api:latest
 | 设备管理 | `/api/v1/devices` |
 | 飞书回调 | `/api/v1/feishu` |
 
-更多接口示例、环境变量、部署方式和飞书接入说明见 [Wiki 首页](wiki/Home.md)。
+更多接口示例、环境变量、部署方式和飞书接入说明见 [Wiki 首页](https://github.com/MarismeCom/doorhub-api/wiki)。
