@@ -7,6 +7,13 @@ from app.schemas import DeviceUserSyncPreviewItem, UserCreate, UserUpdate
 from app.core.zk_client import ZKClient, ZKOperationError
 
 
+class DuplicateUserFieldError(ValueError):
+    def __init__(self, duplicate_fields: list[dict]):
+        self.duplicate_fields = duplicate_fields
+        joined = "，".join([f"{item['label']}“{item['value']}”" for item in duplicate_fields])
+        super().__init__(f"{joined} 已存在")
+
+
 class UserService:
     SYNCABLE_FIELDS = ("uid", "name", "privilege", "password", "group_id", "user_id", "card")
 
@@ -33,10 +40,18 @@ class UserService:
             sort_order=sort_order,
         )
 
+    async def suggest_next_user_id(self, db: AsyncSession) -> str:
+        user_ids = await self.repository.list_all_user_ids(db)
+        used_numeric_ids = {int(item) for item in user_ids if str(item).isdigit()}
+
+        candidate = 1
+        while True:
+            if candidate not in used_numeric_ids:
+                return str(candidate)
+            candidate += 1
+
     async def create_user(self, db: AsyncSession, data: UserCreate, device_ip: str = None) -> User:
-        existing = await self.repository.get_active_by_user_id(db, data.user_id)
-        if existing:
-            raise ValueError(f"用户 ID {data.user_id} 已存在")
+        await self._ensure_unique_fields(db, name=data.name, user_id=data.user_id, card=data.card or 0)
 
         uid = await self.repository.get_max_uid(db) + 1
         user = User(
@@ -59,6 +74,14 @@ class UserService:
         user = await self.repository.get_active_by_user_id(db, user_id)
         if not user:
             raise ValueError(f"用户 {user_id} 不存在")
+
+        await self._ensure_unique_fields(
+            db,
+            name=data.name,
+            user_id=user.user_id,
+            card=data.card or 0,
+            exclude_user_id=user.user_id,
+        )
 
         user.name = data.name
         user.privilege = data.privilege
@@ -356,6 +379,33 @@ class UserService:
             "status": user.status or "active",
             "sync_status": user.sync_status,
         }
+
+    async def _ensure_unique_fields(
+        self,
+        db: AsyncSession,
+        *,
+        name: str,
+        user_id: str,
+        card: int,
+        exclude_user_id: str | None = None,
+    ) -> None:
+        duplicate_fields = []
+
+        existing_user_id = await self.repository.get_active_by_user_id(db, user_id)
+        if existing_user_id and existing_user_id.user_id != exclude_user_id:
+            duplicate_fields.append({"field": "user_id", "label": "用户ID", "value": user_id})
+
+        existing_name = await self.repository.get_by_name(db, name)
+        if existing_name and existing_name.user_id != exclude_user_id:
+            duplicate_fields.append({"field": "name", "label": "姓名", "value": name})
+
+        if card:
+            existing_card = await self.repository.get_by_card(db, card)
+            if existing_card and existing_card.user_id != exclude_user_id:
+                duplicate_fields.append({"field": "card", "label": "卡号", "value": str(card)})
+
+        if duplicate_fields:
+            raise DuplicateUserFieldError(duplicate_fields)
 
     def _diff_local_and_device(self, local_user: User, device_user: dict) -> dict:
         diff = {}
