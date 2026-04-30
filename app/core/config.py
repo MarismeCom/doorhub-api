@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     ZK_DEVICE_TIMEOUT: int = 5
     ZK_DEVICE_ENCODING: str = "gbk"
     ZK_DEVICE_OMIT_PING: bool = False
-    SYNC_INTERVAL_MINUTES: int = 5
     RATE_LIMIT_PER_MINUTE: int = 100
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

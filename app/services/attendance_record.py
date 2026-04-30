@@ -62,6 +62,17 @@ class AttendanceRecordService:
             attendance_query = attendance_query.where(Attendance.user_id == user_id)
         attendance_query = attendance_query.order_by(Attendance.user_id.asc(), Attendance.timestamp.asc())
         attendance_rows = list((await db.execute(attendance_query)).scalars().all())
+
+        if not attendance_rows:
+            await self.repository.delete_records(
+                db,
+                [user.user_id for user in users],
+                start_date,
+                end_date,
+            )
+            await db.commit()
+            return
+
         workday_map = await self.workday_provider.get_workday_map(db, start_date, end_date)
 
         records_by_user_date: dict[tuple[str, date], list[datetime]] = defaultdict(list)
