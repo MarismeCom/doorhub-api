@@ -100,6 +100,23 @@ class DoorLogRepository:
 
 
 class AttendanceDailyRepository:
+    async def delete_records(
+        self,
+        db: AsyncSession,
+        user_ids: list[str],
+        start_date: date,
+        end_date: date,
+    ) -> None:
+        if not user_ids:
+            return
+        await db.execute(
+            delete(AttendanceDaily).where(
+                AttendanceDaily.user_id.in_(user_ids),
+                AttendanceDaily.attend_date >= start_date,
+                AttendanceDaily.attend_date <= end_date,
+            )
+        )
+
     async def replace_records(
         self,
         db: AsyncSession,

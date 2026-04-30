@@ -305,6 +305,34 @@ async def test_attendance_daily_marks_weekend_records_as_overtime(db_session):
 
 
 @pytest.mark.asyncio
+async def test_attendance_daily_skips_month_generation_when_no_raw_attendance(db_session):
+    db_session.add(
+        User(
+            uid=71,
+            user_id="71",
+            name="No Attendance",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={})
+    service.repository.delete_records = AsyncMock()
+    service.repository.replace_records = AsyncMock()
+
+    await service.ensure_monthly_records(db_session, "2026-04", user_id="71")
+
+    service.repository.delete_records.assert_awaited_once()
+    service.repository.replace_records.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_export_monthly_csv_includes_overtime_status_and_duration_for_weekend_records(db_session):
     service = AttendanceRecordService()
     service.ensure_monthly_records = AsyncMock()

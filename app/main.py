@@ -27,9 +27,11 @@ from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.exceptions import register_exception_handlers
 from app.integrations.feishu.longconn import feishu_longconn_manager
+from app.services.device import DeviceService
 
 settings = get_settings()
 START_TIME = time.time()
+device_svc = DeviceService()
 
 logger.add(
     "logs/app.log",
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
 
     async with SessionLocal() as db:
         await ensure_bootstrap_admin(db)
+        await device_svc.ensure_configured_devices(db)
 
     attendance_sync_manager.start()
     holiday_cache_manager.start()

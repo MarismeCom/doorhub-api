@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models import Device
 from app.repositories.device import DeviceRepository
 from app.core.zk_client import ZKClient
@@ -10,10 +11,41 @@ from app.schemas.device import DeviceCreate, DeviceUpdate
 
 class DeviceService:
     def __init__(self):
+        self.settings = get_settings()
         self.repository = DeviceRepository()
 
     async def list_active(self, db: AsyncSession) -> list[Device]:
         return await self.repository.list_active(db)
+
+    async def ensure_configured_devices(self, db: AsyncSession) -> list[Device]:
+        device_ips = [ip.strip() for ip in self.settings.ZK_DEVICE_IPS.split(",") if ip.strip()]
+        devices: list[Device] = []
+
+        for ip in device_ips:
+            device = await self.repository.get_by_ip(db, ip)
+            if device:
+                if not device.is_active:
+                    device.is_active = True
+                    await db.flush()
+                devices.append(device)
+                continue
+
+            device = Device(
+                name=f"设备-{ip}",
+                ip=ip,
+                port=self.settings.ZK_DEVICE_PORT,
+                is_active=True,
+            )
+            db.add(device)
+            await db.flush()
+            devices.append(device)
+
+        if device_ips:
+            await db.commit()
+            for device in devices:
+                await db.refresh(device)
+
+        return devices
 
     async def create_device(self, db: AsyncSession, data: DeviceCreate) -> Device:
         existing = await self.repository.get_by_ip(db, data.ip)

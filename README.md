@@ -909,7 +909,6 @@ curl -X GET "http://localhost:8000/health"
 | ZK_DEVICE_PORT | ZK 设备端口 | 4370 |
 | ZK_DEVICE_TIMEOUT | 设备连接超时(秒) | 5 |
 | ZK_DEVICE_ENCODING | 设备字符编码 | gbk |
-| SYNC_INTERVAL_MINUTES | 打卡记录同步间隔(分钟) | 5 |
 | RATE_LIMIT_PER_MINUTE | API 限流(每分钟) | 100 |
 | APP_HOST | 服务监听地址 | 0.0.0.0 |
 | APP_PORT | 服务监听端口 | 8000 |
