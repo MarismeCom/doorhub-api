@@ -328,7 +328,150 @@ async def test_attendance_daily_skips_month_generation_when_no_raw_attendance(db
 
     await service.ensure_monthly_records(db_session, "2026-04", user_id="71")
 
+    service.repository.delete_records.assert_not_called()
+    service.repository.replace_records.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_force_clears_existing_records_when_no_raw_attendance(db_session):
+    db_session.add(
+        User(
+            uid=72,
+            user_id="72",
+            name="Force Clear",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={})
+    service.repository.delete_records = AsyncMock()
+    service.repository.replace_records = AsyncMock()
+
+    await service.ensure_monthly_records(db_session, "2026-04", user_id="72", force=True)
+
     service.repository.delete_records.assert_awaited_once()
+    service.repository.replace_records.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_only_generates_users_with_raw_attendance(db_session):
+    db_session.add_all(
+        [
+            User(
+                uid=73,
+                user_id="73",
+                name="Has Attendance",
+                privilege=0,
+                password="",
+                group_id="",
+                card=0,
+                status="active",
+                sync_status="pending",
+            ),
+            User(
+                uid=74,
+                user_id="74",
+                name="No Attendance",
+                privilege=0,
+                password="",
+                group_id="",
+                card=0,
+                status="active",
+                sync_status="pending",
+            ),
+        ]
+    )
+    db_session.add_all(
+        [
+            Attendance(
+                id=21,
+                user_id="73",
+                uid=73,
+                timestamp=datetime(2026, 4, 10, 9, 0, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="7984",
+            ),
+            Attendance(
+                id=22,
+                user_id="73",
+                uid=73,
+                timestamp=datetime(2026, 4, 10, 18, 0, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="8166",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={datetime(2026, 4, 10).date(): True})
+    captured = {}
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db, start_date, end_date
+        captured[user_id] = records
+
+    service.repository.replace_records = fake_replace_records
+    await service.ensure_monthly_records(db_session, "2026-04")
+
+    assert list(captured.keys()) == ["73"]
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_skips_rebuild_when_existing_records_present(db_session):
+    db_session.add(
+        User(
+            uid=75,
+            user_id="75",
+            name="Already Generated",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    db_session.add_all(
+        [
+            Attendance(
+                id=23,
+                user_id="75",
+                uid=75,
+                timestamp=datetime(2026, 4, 11, 9, 0, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="7984",
+            ),
+            Attendance(
+                id=24,
+                user_id="75",
+                uid=75,
+                timestamp=datetime(2026, 4, 11, 18, 0, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="8166",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={datetime(2026, 4, 11).date(): True})
+    service.repository.get_existing_user_ids = AsyncMock(return_value={"75"})
+    service.repository.replace_records = AsyncMock()
+
+    await service.ensure_monthly_records(db_session, "2026-04")
+
     service.repository.replace_records.assert_not_called()
 
 
