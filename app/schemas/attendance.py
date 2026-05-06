@@ -118,6 +118,16 @@ class AttendanceRecalculateRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class AttendanceRuleSettingsResponse(BaseModel):
+    plan_start: str = "10:00"
+    plan_end: str = "18:00"
+
+
+class AttendanceRuleSettingsUpdate(BaseModel):
+    plan_start: str
+    plan_end: str
+
+
 class HolidayCacheRefreshRequest(BaseModel):
     year: int
 

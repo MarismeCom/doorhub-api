@@ -10,21 +10,22 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.zk_client import DEVICE_TIMEZONE
-from app.core.config import get_settings
-from app.models import Attendance, AttendanceDaily, User
+from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, User
 from app.repositories.attendance import AttendanceDailyRepository
 from app.repositories.holiday_calendar import HolidayCalendarRepository
 from app.schemas import AttendanceMonthlySummaryResponse
 from app.services.workday import build_workday_provider
 
+DEFAULT_PLAN_START = time(hour=10, minute=0)
+DEFAULT_PLAN_END = time(hour=18, minute=0)
+
 
 class AttendanceRecordService:
     def __init__(self):
-        settings = get_settings()
         self.repository = AttendanceDailyRepository()
         self.holiday_repository = HolidayCalendarRepository()
-        self.plan_start = self._parse_time(settings.ATTENDANCE_PLAN_START, default=time(hour=9, minute=0))
-        self.plan_end = self._parse_time(settings.ATTENDANCE_PLAN_END, default=time(hour=18, minute=0))
+        self.plan_start = DEFAULT_PLAN_START
+        self.plan_end = DEFAULT_PLAN_END
         self.workday_provider = build_workday_provider()
         self._ensure_locks: dict[str, asyncio.Lock] = {}
 
@@ -35,6 +36,63 @@ class AttendanceRecordService:
         except ValueError as exc:
             raise ValueError("year_month 必须为 YYYY-MM") from exc
         return date(year, month, 1), date(year, month, last_day)
+
+    def effective_year_month_range(self, year_month: str, today: date | None = None) -> tuple[date, date]:
+        start_date, end_date = self.parse_year_month(year_month)
+        now = datetime.now(DEVICE_TIMEZONE)
+        effective_today = today or now.date()
+        if today is None and now.time() <= self.plan_end:
+            effective_today -= timedelta(days=1)
+        return start_date, min(end_date, effective_today)
+
+    async def get_rule_settings(self, db: AsyncSession) -> dict:
+        row = await self._get_or_create_rule_settings(db)
+        self._apply_rule_settings(row.plan_start, row.plan_end)
+        return {
+            "plan_start": self.plan_start.strftime("%H:%M"),
+            "plan_end": self.plan_end.strftime("%H:%M"),
+        }
+
+    async def update_rule_settings(self, db: AsyncSession, plan_start: str, plan_end: str) -> dict:
+        parsed_start = self._parse_required_time(plan_start, "上班时间")
+        parsed_end = self._parse_required_time(plan_end, "下班时间")
+        if parsed_start >= parsed_end:
+            raise ValueError("上班时间必须早于下班时间")
+
+        row = await db.get(AttendanceRuleSetting, 1)
+        if row is None:
+            row = AttendanceRuleSetting(id=1)
+            db.add(row)
+        row.plan_start = parsed_start.strftime("%H:%M")
+        row.plan_end = parsed_end.strftime("%H:%M")
+        await db.commit()
+
+        self.plan_start = parsed_start
+        self.plan_end = parsed_end
+        return {
+            "plan_start": row.plan_start,
+            "plan_end": row.plan_end,
+        }
+
+    async def _load_rule_settings(self, db: AsyncSession) -> None:
+        row = await self._get_or_create_rule_settings(db)
+        self._apply_rule_settings(row.plan_start, row.plan_end)
+
+    async def _get_or_create_rule_settings(self, db: AsyncSession) -> AttendanceRuleSetting:
+        row = await db.get(AttendanceRuleSetting, 1)
+        if row is None:
+            row = AttendanceRuleSetting(
+                id=1,
+                plan_start=DEFAULT_PLAN_START.strftime("%H:%M"),
+                plan_end=DEFAULT_PLAN_END.strftime("%H:%M"),
+            )
+            db.add(row)
+            await db.commit()
+        return row
+
+    def _apply_rule_settings(self, plan_start: str, plan_end: str) -> None:
+        self.plan_start = self._parse_time(plan_start, default=self.plan_start)
+        self.plan_end = self._parse_time(plan_end, default=self.plan_end)
 
     async def ensure_monthly_records(
         self,
@@ -65,7 +123,8 @@ class AttendanceRecordService:
         user_id: str | None = None,
         force: bool = False,
     ) -> None:
-        start_date, end_date = self.parse_year_month(year_month)
+        await self._load_rule_settings(db)
+        start_date, end_date = self.effective_year_month_range(year_month)
 
         timestamps_start = datetime.combine(start_date, time.min, tzinfo=DEVICE_TIMEZONE)
         timestamps_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=DEVICE_TIMEZONE)
@@ -221,7 +280,7 @@ class AttendanceRecordService:
     ) -> tuple[list[dict], int]:
         if ensure:
             await self.ensure_monthly_records(db, year_month, keyword=keyword)
-        start_date, end_date = self.parse_year_month(year_month)
+        start_date, end_date = self.effective_year_month_range(year_month)
         return await self.repository.list_records(db, start_date, end_date, keyword, status, page, page_size)
 
     async def get_monthly_summary(
@@ -233,7 +292,7 @@ class AttendanceRecordService:
     ) -> AttendanceMonthlySummaryResponse:
         if ensure:
             await self.ensure_monthly_records(db, year_month, keyword=keyword)
-        start_date, end_date = self.parse_year_month(year_month)
+        start_date, end_date = self.effective_year_month_range(year_month)
         summary = await self.repository.monthly_summary(db, start_date, end_date, keyword)
         return AttendanceMonthlySummaryResponse(year_month=year_month, **summary)
 
@@ -245,7 +304,7 @@ class AttendanceRecordService:
         status: int | None = None,
     ) -> bytes:
         await self.ensure_monthly_records(db, year_month, keyword=keyword)
-        start_date, end_date = self.parse_year_month(year_month)
+        start_date, end_date = self.effective_year_month_range(year_month)
         records = await self.repository.list_all_records(db, start_date, end_date, keyword, status)
         holiday_rows = await self.holiday_repository.list_by_range(db, start_date, end_date)
         holiday_map = {row.holiday_date.isoformat(): row for row in holiday_rows}
@@ -318,6 +377,14 @@ class AttendanceRecordService:
             return time(hour=hour, minute=minute)
         except (AttributeError, ValueError):
             return default
+
+    @staticmethod
+    def _parse_required_time(value: str, label: str) -> time:
+        try:
+            hour, minute = [int(part) for part in value.split(":", 1)]
+            return time(hour=hour, minute=minute)
+        except (AttributeError, ValueError) as exc:
+            raise ValueError(f"{label}必须为 HH:mm") from exc
 
     @staticmethod
     def day_type_label(attend_date: str, holiday_map: dict) -> str:

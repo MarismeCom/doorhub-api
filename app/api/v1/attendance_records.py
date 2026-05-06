@@ -9,6 +9,7 @@ from app.schemas import (
     ApiResponse,
     AttendanceDailyResponse,
     AttendanceRecalculateRequest,
+    AttendanceRuleSettingsUpdate,
     HolidayCacheRefreshRequest,
     HolidayCacheScheduleUpdate,
 )
@@ -56,6 +57,26 @@ async def recalculate_attendance_records(data: AttendanceRecalculateRequest, db:
         await attendance_record_svc.ensure_monthly_records(db, data.year_month, user_id=data.user_id, force=True)
         summary = await attendance_record_svc.get_monthly_summary(db, data.year_month, data.user_id, ensure=False)
         return ApiResponse(message="考勤记录已重算", data={"summary": summary.model_dump()})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 2002, "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
+
+
+@router.get("/rule-settings", response_model=ApiResponse)
+async def get_attendance_rule_settings(db: DBSessionDep):
+    try:
+        settings = await attendance_record_svc.get_rule_settings(db)
+        return ApiResponse(data=settings)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
+
+
+@router.put("/rule-settings", response_model=ApiResponse)
+async def update_attendance_rule_settings(data: AttendanceRuleSettingsUpdate, db: DBSessionDep):
+    try:
+        settings = await attendance_record_svc.update_rule_settings(db, data.plan_start, data.plan_end)
+        return ApiResponse(message="考勤规则已保存", data=settings)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 2002, "message": str(e)})
     except Exception as e:
