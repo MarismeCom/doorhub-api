@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -12,7 +12,7 @@ from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode
 from app.db.base import Base
 from app.db.session import build_async_database_url
 from app.core.attendance_sync_manager import AttendanceSyncManager
-from app.models import Attendance, AttendanceDaily, AttendanceSyncSetting, User
+from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, AttendanceSyncSetting, User
 from app.repositories.attendance import AttendanceRepository
 from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
@@ -463,6 +463,214 @@ async def test_attendance_daily_only_generates_users_with_raw_attendance(db_sess
 
 
 @pytest.mark.asyncio
+async def test_attendance_daily_current_month_generates_only_through_yesterday_before_plan_end(db_session):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 5, 12, 0, 0, tzinfo=tz)
+
+    db_session.add(
+        User(
+            uid=76,
+            user_id="76",
+            name="Current Month",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    db_session.add(
+        Attendance(
+            id=25,
+            user_id="76",
+            uid=76,
+            timestamp=datetime(2026, 5, 3, 9, 0, 0, tzinfo=DEVICE_TIMEZONE),
+            status=15,
+            punch=0,
+            device_sn="7984",
+        )
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={})
+    captured = {}
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db
+        captured[user_id] = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "records": records,
+        }
+
+    service.repository.replace_records = fake_replace_records
+    with patch("app.services.attendance_record.datetime", FrozenDateTime):
+        await service.ensure_monthly_records(db_session, "2026-05", user_id="76")
+
+    generated = captured["76"]["records"]
+    assert captured["76"]["start_date"] == date(2026, 5, 1)
+    assert captured["76"]["end_date"] == date(2026, 5, 4)
+    assert len(generated) == 4
+    assert max(item.attend_date for item in generated) == date(2026, 5, 4)
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_current_month_includes_today_after_plan_end(db_session):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 5, 19, 0, 0, tzinfo=tz)
+
+    db_session.add(
+        User(
+            uid=77,
+            user_id="77",
+            name="After Plan End",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    db_session.add(
+        Attendance(
+            id=26,
+            user_id="77",
+            uid=77,
+            timestamp=datetime(2026, 5, 3, 9, 0, 0, tzinfo=DEVICE_TIMEZONE),
+            status=15,
+            punch=0,
+            device_sn="7984",
+        )
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={})
+    captured = {}
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db
+        captured[user_id] = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "records": records,
+        }
+
+    service.repository.replace_records = fake_replace_records
+    with patch("app.services.attendance_record.datetime", FrozenDateTime):
+        await service.ensure_monthly_records(db_session, "2026-05", user_id="77")
+
+    generated = captured["77"]["records"]
+    assert captured["77"]["start_date"] == date(2026, 5, 1)
+    assert captured["77"]["end_date"] == date(2026, 5, 5)
+    assert len(generated) == 5
+    assert max(item.attend_date for item in generated) == date(2026, 5, 5)
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_list_current_month_queries_only_through_yesterday_before_plan_end(db_session):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 5, 12, 0, 0, tzinfo=tz)
+
+    service = AttendanceRecordService()
+    service.repository.list_records = AsyncMock(return_value=([], 0))
+
+    with patch("app.services.attendance_record.datetime", FrozenDateTime):
+        records, total = await service.list_daily_records(db_session, "2026-05", ensure=False)
+
+    assert records == []
+    assert total == 0
+    service.repository.list_records.assert_awaited_once_with(
+        db_session,
+        date(2026, 5, 1),
+        date(2026, 5, 4),
+        None,
+        None,
+        1,
+        20,
+    )
+
+
+@pytest.mark.asyncio
+async def test_attendance_rule_settings_persist_to_database(db_session):
+    service = AttendanceRecordService()
+
+    updated = await service.update_rule_settings(db_session, "10:00", "18:00")
+    saved = await db_session.get(AttendanceRuleSetting, 1)
+
+    assert updated == {"plan_start": "10:00", "plan_end": "18:00"}
+    assert saved is not None
+    assert saved.plan_start == "10:00"
+    assert saved.plan_end == "18:00"
+
+
+@pytest.mark.asyncio
+async def test_attendance_daily_uses_database_rule_settings(db_session):
+    db_session.add(AttendanceRuleSetting(id=1, plan_start="10:00", plan_end="18:00"))
+    db_session.add(
+        User(
+            uid=78,
+            user_id="78",
+            name="Custom Rule",
+            privilege=0,
+            password="",
+            group_id="",
+            card=0,
+            status="active",
+            sync_status="pending",
+        )
+    )
+    db_session.add_all(
+        [
+            Attendance(
+                id=27,
+                user_id="78",
+                uid=78,
+                timestamp=datetime(2026, 4, 15, 9, 30, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="7984",
+            ),
+            Attendance(
+                id=28,
+                user_id="78",
+                uid=78,
+                timestamp=datetime(2026, 4, 15, 18, 0, 0, tzinfo=DEVICE_TIMEZONE),
+                status=15,
+                punch=0,
+                device_sn="8166",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = AttendanceRecordService()
+    service.workday_provider.get_workday_map = AsyncMock(return_value={datetime(2026, 4, 15).date(): True})
+    captured = {}
+
+    async def fake_replace_records(db, user_id, start_date, end_date, records):
+        del db, start_date, end_date
+        captured[user_id] = records
+
+    service.repository.replace_records = fake_replace_records
+    await service.ensure_monthly_records(db_session, "2026-04", user_id="78")
+
+    daily = next(item for item in captured["78"] if item.attend_date == date(2026, 4, 15))
+    assert daily.plan_start == "10:00"
+    assert daily.late_minutes == 0
+    assert daily.status == 1
+
+
+@pytest.mark.asyncio
 async def test_attendance_daily_skips_rebuild_when_existing_records_present(db_session):
     db_session.add(
         User(
@@ -559,6 +767,15 @@ async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_
             await conn.run_sync(Base.metadata.create_all)
 
         async with session_factory() as session:
+            original_rule = await session.get(AttendanceRuleSetting, 1)
+            original_rule_values = None
+            if original_rule is not None:
+                original_rule_values = (original_rule.plan_start, original_rule.plan_end)
+                original_rule.plan_start = "10:00"
+                original_rule.plan_end = "18:00"
+            else:
+                session.add(AttendanceRuleSetting(id=1, plan_start="10:00", plan_end="18:00"))
+
             session.add(
                 User(
                     uid=test_uid,
@@ -614,6 +831,10 @@ async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_
             await session.execute(AttendanceDaily.__table__.delete().where(AttendanceDaily.user_id == test_user_id))
             await session.execute(Attendance.__table__.delete().where(Attendance.user_id == test_user_id))
             await session.execute(User.__table__.delete().where(User.user_id == test_user_id))
+            if original_rule_values is not None:
+                restored_rule = await session.get(AttendanceRuleSetting, 1)
+                restored_rule.plan_start = original_rule_values[0]
+                restored_rule.plan_end = original_rule_values[1]
             await session.commit()
     finally:
         await engine.dispose()
