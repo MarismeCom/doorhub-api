@@ -11,12 +11,8 @@ from app.core.config import get_settings
 from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode_zk_time
 from app.db.base import Base
 from app.db.session import build_async_database_url
-<<<<<<< HEAD
-from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, User
-=======
 from app.core.attendance_sync_manager import AttendanceSyncManager
 from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, AttendanceSyncSetting, User
->>>>>>> main
 from app.repositories.attendance import AttendanceRepository
 from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
