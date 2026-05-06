@@ -63,3 +63,13 @@ class HolidayCalendar(Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
     fetched_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttendanceRuleSetting(Base):
+    __tablename__ = "attendance_rule_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    plan_start: Mapped[str] = mapped_column(String(5), nullable=False, default="10:00")
+    plan_end: Mapped[str] = mapped_column(String(5), nullable=False, default="18:00")
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
