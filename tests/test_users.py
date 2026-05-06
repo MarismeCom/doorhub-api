@@ -5,8 +5,8 @@ from contextlib import contextmanager
 import pytest
 
 from app.models import User
-from app.schemas import UserCreate
-from app.services.user import UserService
+from app.schemas import UserCreate, UserUpdate
+from app.services.user import DuplicateUserFieldError, UserService
 from app.core.zk_client import ZKClient
 
 
@@ -35,6 +35,68 @@ async def test_create_user(db_session):
     assert user.user_id == "EMP001"
     assert user.status == "active"
     assert user.sync_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_suggest_next_user_id_uses_smallest_missing_numeric_value(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="1", name="U1", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=2, user_id="2", name="U2", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=3, user_id="4", name="U4", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=4, user_id="9988", name="ADMIN", privilege=14, password="", group_id="", card=0, sync_status="synced"),
+            User(uid=5, user_id="EMP003", name="EMP003", privilege=0, password="", group_id="", card=0, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+    next_user_id = await svc.suggest_next_user_id(db_session)
+
+    assert next_user_id == "3"
+
+
+@pytest.mark.asyncio
+async def test_create_user_rejects_duplicate_name_user_id_and_card(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="EMP001", name="张三", privilege=0, password="", group_id="", card=1001, sync_status="synced"),
+            User(uid=2, user_id="EMP002", name="李四", privilege=0, password="", group_id="", card=1002, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+
+    with pytest.raises(DuplicateUserFieldError) as exc_info:
+        await svc.create_user(
+            db_session,
+            UserCreate(name="张三", user_id="EMP002", card=1002, device_ip="192.168.1.201"),
+        )
+
+    assert [item["field"] for item in exc_info.value.duplicate_fields] == ["user_id", "name", "card"]
+
+
+@pytest.mark.asyncio
+async def test_update_user_rejects_duplicate_name_and_card_from_other_user(db_session):
+    db_session.add_all(
+        [
+            User(uid=1, user_id="EMP001", name="张三", privilege=0, password="", group_id="", card=1001, sync_status="synced"),
+            User(uid=2, user_id="EMP002", name="李四", privilege=0, password="", group_id="", card=1002, sync_status="synced"),
+        ]
+    )
+    await db_session.commit()
+
+    svc = UserService()
+
+    with pytest.raises(DuplicateUserFieldError) as exc_info:
+        await svc.update_user(
+            db_session,
+            "EMP002",
+            UserUpdate(name="张三", privilege=0, password="", group_id="", card=1001),
+        )
+
+    assert [item["field"] for item in exc_info.value.duplicate_fields] == ["name", "card"]
 
 
 @pytest.mark.asyncio
@@ -111,6 +173,56 @@ async def test_overwrite_local_updates_different_users(mock_get_users, db_sessio
 
 @pytest.mark.asyncio
 @patch("app.services.user.ZKClient.get_users")
+async def test_overwrite_local_marks_zero_card_user_as_disabled(mock_get_users, db_session):
+    db_session.add(User(uid=12, user_id="EMP012", name="原用户", privilege=0, password="7777", group_id="1", card=8888, status="active", sync_status="failed"))
+    await db_session.commit()
+
+    mock_get_users.return_value = [device_user(uid=12, user_id="EMP012", name="原用户", card=0, password="9999", group_id="1")]
+
+    svc = UserService()
+    result = await svc.sync_users_from_device(db_session, "192.168.1.201", "overwrite_local")
+    updated = await svc.repository.get_by_user_id(db_session, "EMP012")
+
+    assert result["updated_count"] == 1
+    assert updated.status == "disabled"
+    assert updated.sync_status == "synced_disabled"
+    assert updated.password == ""
+    assert updated.card == 0
+
+
+@pytest.mark.asyncio
+@patch("app.services.user.ZKClient.get_users")
+async def test_write_missing_marks_zero_card_user_as_disabled(mock_get_users, db_session):
+    mock_get_users.return_value = [device_user(uid=13, user_id="EMP013", name="设备用户", card=0, password="3333")]
+
+    svc = UserService()
+    result = await svc.sync_users_from_device(db_session, "192.168.1.201", "write_missing")
+    inserted = await svc.repository.get_by_user_id(db_session, "EMP013")
+
+    assert result["inserted_count"] == 1
+    assert inserted is not None
+    assert inserted.status == "disabled"
+    assert inserted.sync_status == "synced_disabled"
+    assert inserted.password == ""
+    assert inserted.card == 0
+
+
+@pytest.mark.asyncio
+async def test_get_users_normalizes_synced_zero_card_user_to_disabled(db_session):
+    db_session.add(User(uid=14, user_id="EMP014", name="本地旧数据", privilege=0, password="1234", group_id="", card=0, status="active", sync_status="synced"))
+    await db_session.commit()
+
+    svc = UserService()
+    users, _ = await svc.get_users(db_session, page=1, page_size=20)
+    normalized = next(user for user in users if user.user_id == "EMP014")
+
+    assert normalized.status == "disabled"
+    assert normalized.sync_status == "synced_disabled"
+    assert normalized.password == ""
+
+
+@pytest.mark.asyncio
+@patch("app.services.user.ZKClient.get_users")
 @patch("app.services.user.ZKClient.save_user")
 async def test_sync_user_to_device_verifies_single_user_after_save(mock_save_user, mock_get_users, db_session):
     db_session.add(User(uid=9, user_id="EMP009", name="王五", privilege=14, password="1234", group_id="1", card=5678, sync_status="pending"))
@@ -167,6 +279,8 @@ async def test_disable_user_clears_password_and_card_on_device(mock_save_user, m
     assert result["status"] == "success"
     assert "离职同步成功" in result["message"]
     assert updated.sync_status == "synced_disabled"
+    assert updated.password == ""
+    assert updated.card == 0
     mock_save_user.assert_called_once_with(11, "停用用户", 0, "", "2", "EMP011", 0)
 
 

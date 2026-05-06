@@ -16,7 +16,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.runtime import get_app_loop
 from app.db.session import SessionLocal
-from app.models import Device
+from app.models import AttendanceSyncSetting, Device
 from app.services.attendance import AttendanceService
 
 
@@ -50,10 +50,12 @@ class AttendanceSyncManager:
             "skipped_invalid_count": 0,
         }
         self._settings_path = Path(__file__).resolve().parents[2] / "data" / "attendance_sync_settings.json"
-        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self._settings = self._load_settings()
+        self._settings = AttendanceSyncSettings()
         self._manual_task: Future | None = None
         self._scheduled_task: Future | None = None
+
+    async def initialize(self):
+        self._settings = await self._load_settings_from_db()
 
     def start(self):
         if not self._scheduler.running:
@@ -79,9 +81,9 @@ class AttendanceSyncManager:
             "timezone": str(self._timezone),
         }
 
-    def update_settings(self, enabled: bool, time_value: str, device_ips: list[str] | None = None) -> dict:
+    async def update_settings(self, enabled: bool, time_value: str, device_ips: list[str] | None = None) -> dict:
         self._settings = AttendanceSyncSettings(enabled=enabled, time=time_value, device_ips=device_ips or [])
-        self._save_settings()
+        await self._save_settings_to_db()
         self._refresh_schedule()
         return self.get_settings()
 
@@ -248,34 +250,47 @@ class AttendanceSyncManager:
         with self._state_lock:
             self._status.update(kwargs)
 
-    def _load_settings(self) -> AttendanceSyncSettings:
+    async def _load_settings_from_db(self) -> AttendanceSyncSettings:
+        async with SessionLocal() as db:
+            row = await db.get(AttendanceSyncSetting, 1)
+            if row is None:
+                settings = self._load_legacy_or_default_settings()
+                row = AttendanceSyncSetting(
+                    id=1,
+                    enabled=settings.enabled,
+                    time=settings.time,
+                )
+                row.device_ips = settings.device_ips
+                db.add(row)
+                await db.commit()
+                return settings
+
+            return AttendanceSyncSettings(
+                enabled=row.enabled,
+                time=row.time,
+                device_ips=row.device_ips,
+            )
+
+    async def _save_settings_to_db(self):
+        async with SessionLocal() as db:
+            row = await db.get(AttendanceSyncSetting, 1)
+            if row is None:
+                row = AttendanceSyncSetting(id=1)
+                db.add(row)
+            row.enabled = self._settings.enabled
+            row.time = self._settings.time
+            row.device_ips = self._settings.device_ips
+            await db.commit()
+
+    def _load_legacy_or_default_settings(self) -> AttendanceSyncSettings:
         if not self._settings_path.exists():
-            settings = AttendanceSyncSettings()
-            self._write_settings(settings)
-            return settings
+            return AttendanceSyncSettings()
 
         data = json.loads(self._settings_path.read_text(encoding="utf-8"))
         return AttendanceSyncSettings(
             enabled=bool(data.get("enabled", False)),
             time=str(data.get("time", "23:00")),
             device_ips=[str(ip) for ip in data.get("device_ips", []) if ip],
-        )
-
-    def _save_settings(self):
-        self._write_settings(self._settings)
-
-    def _write_settings(self, settings: AttendanceSyncSettings):
-        self._settings_path.write_text(
-            json.dumps(
-                {
-                    "enabled": settings.enabled,
-                    "time": settings.time,
-                    "device_ips": list(settings.device_ips or []),
-                },
-                ensure_ascii=True,
-                indent=2,
-            ),
-            encoding="utf-8",
         )
 
     def _refresh_schedule(self):

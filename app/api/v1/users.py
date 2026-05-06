@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.deps import CurrentUserDep, DBSessionDep
 from app.schemas import ApiResponse, UserCreate, UserResponse, UserSyncFromDeviceRequest, UserUpdate
-from app.services.user import UserService
+from app.services.user import DuplicateUserFieldError, UserService
 
 router = APIRouter(prefix="/api/v1/users", tags=["用户管理"])
 user_svc = UserService()
@@ -45,6 +45,18 @@ async def create_user(data: UserCreate, db: DBSessionDep, current_user: CurrentU
     try:
         user = await user_svc.create_user(db, data, data.device_ip)
         return ApiResponse(message="用户创建成功（待同步）", data={"uid": user.uid, "user_id": user.user_id, "name": user.name, "sync_status": user.sync_status})
+    except DuplicateUserFieldError as e:
+        raise HTTPException(status_code=400, detail={"code": 2003, "message": str(e), "duplicate_fields": e.duplicate_fields})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 2002, "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
+
+
+@router.get("/next-user-id", response_model=ApiResponse)
+async def get_next_user_id(db: DBSessionDep, current_user: CurrentUserDep):
+    try:
+        return ApiResponse(data={"user_id": await user_svc.suggest_next_user_id(db)})
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 2002, "message": str(e)})
     except Exception as e:
@@ -59,6 +71,8 @@ async def update_user(user_id: str, data: UserUpdate, db: DBSessionDep, current_
             message="用户更新成功（待同步）",
             data={"uid": user.uid, "user_id": user.user_id, "name": user.name, "sync_status": user.sync_status},
         )
+    except DuplicateUserFieldError as e:
+        raise HTTPException(status_code=400, detail={"code": 2003, "message": str(e), "duplicate_fields": e.duplicate_fields})
     except ValueError as e:
         raise HTTPException(status_code=404, detail={"code": 2001, "message": str(e)})
     except Exception as e:
