@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode_zk_time
 from app.db.base import Base
 from app.db.session import build_async_database_url
-from app.models import Attendance, AttendanceDaily, User
+from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, User
 from app.repositories.attendance import AttendanceRepository
 from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
@@ -523,6 +523,15 @@ async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_
             await conn.run_sync(Base.metadata.create_all)
 
         async with session_factory() as session:
+            original_rule = await session.get(AttendanceRuleSetting, 1)
+            original_rule_values = None
+            if original_rule is not None:
+                original_rule_values = (original_rule.plan_start, original_rule.plan_end)
+                original_rule.plan_start = "10:00"
+                original_rule.plan_end = "18:00"
+            else:
+                session.add(AttendanceRuleSetting(id=1, plan_start="10:00", plan_end="18:00"))
+
             session.add(
                 User(
                     uid=test_uid,
@@ -578,6 +587,10 @@ async def test_attendance_daily_groups_first_and_last_punch_with_local_timezone_
             await session.execute(AttendanceDaily.__table__.delete().where(AttendanceDaily.user_id == test_user_id))
             await session.execute(Attendance.__table__.delete().where(Attendance.user_id == test_user_id))
             await session.execute(User.__table__.delete().where(User.user_id == test_user_id))
+            if original_rule_values is not None:
+                restored_rule = await session.get(AttendanceRuleSetting, 1)
+                restored_rule.plan_start = original_rule_values[0]
+                restored_rule.plan_end = original_rule_values[1]
             await session.commit()
     finally:
         await engine.dispose()
