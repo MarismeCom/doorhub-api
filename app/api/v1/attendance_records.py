@@ -1,13 +1,15 @@
 import calendar
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.holiday_cache_manager import holiday_cache_manager
-from app.deps import DBSessionDep
+from app.deps import CurrentUserDep, DBSessionDep
 from app.repositories.holiday_calendar import HolidayCalendarRepository
 from app.schemas import (
     ApiResponse,
     AttendanceDailyResponse,
+    AttendanceMonthlyExportSettingsUpdate,
     AttendanceRecalculateRequest,
     AttendanceRuleSettingsUpdate,
     HolidayCacheRefreshRequest,
@@ -83,15 +85,42 @@ async def update_attendance_rule_settings(data: AttendanceRuleSettingsUpdate, db
         raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
 
 
+@router.get("/export/monthly/settings", response_model=ApiResponse)
+async def get_monthly_export_settings(db: DBSessionDep, current_user: CurrentUserDep):
+    try:
+        return ApiResponse(data=await attendance_record_svc.get_monthly_export_settings(db, current_user))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
+
+
+@router.put("/export/monthly/settings", response_model=ApiResponse)
+async def update_monthly_export_settings(data: AttendanceMonthlyExportSettingsUpdate, db: DBSessionDep, current_user: CurrentUserDep):
+    try:
+        return ApiResponse(message="月报导出字段已保存", data=await attendance_record_svc.update_monthly_export_settings(db, current_user, data.selected_fields))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 2002, "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 5000, "message": str(e)})
+
+
 @router.get("/export/monthly")
 async def export_monthly_attendance(
     db: DBSessionDep,
+    current_user: CurrentUserDep,
     year_month: str,
     keyword: str = None,
     status: int = Query(default=None, ge=1, le=7),
+    fields: list[str] | None = Query(default=None),
 ):
     try:
-        content = await attendance_record_svc.export_monthly_csv(db, year_month, keyword, status)
+        content = await attendance_record_svc.export_monthly_csv(
+            db,
+            year_month,
+            keyword,
+            status,
+            current_user=current_user,
+            selected_fields=fields,
+        )
         filename = f"attendance_{year_month.replace('-', '')}.csv"
         return StreamingResponse(
             iter([content]),

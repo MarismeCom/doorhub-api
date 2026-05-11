@@ -1,7 +1,6 @@
 from datetime import date, datetime
-from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AttendanceResponse(BaseModel):
@@ -9,12 +8,12 @@ class AttendanceResponse(BaseModel):
 
     id: int
     user_id: str
-    user_name: Optional[str] = None
-    uid: Optional[int]
+    user_name: str | None = None
+    uid: int | None
     timestamp: datetime
     status: int
     punch: int
-    device_sn: Optional[str]
+    device_sn: str | None
 
 
 class AttendanceListResponse(BaseModel):
@@ -78,19 +77,19 @@ class AttendanceDailyResponse(BaseModel):
 
     id: int
     user_id: str
-    user_name: Optional[str] = None
+    user_name: str | None = None
     attend_date: date
-    plan_start: Optional[str] = None
-    plan_end: Optional[str] = None
-    actual_checkin: Optional[datetime] = None
-    actual_checkout: Optional[datetime] = None
+    plan_start: str | None = None
+    plan_end: str | None = None
+    actual_checkin: datetime | None = None
+    actual_checkout: datetime | None = None
     late_minutes: int = 0
     early_minutes: int = 0
     work_minutes: int = 0
     overtime_minutes: int = 0
     status: int
     is_workday: bool = True
-    calc_time: Optional[datetime] = None
+    calc_time: datetime | None = None
 
 
 class AttendanceDailyListResponse(BaseModel):
@@ -113,9 +112,24 @@ class AttendanceMonthlySummaryResponse(BaseModel):
     total_overtime_minutes: int = 0
 
 
+class AttendanceMonthlyExportField(BaseModel):
+    key: str
+    label: str
+
+
+class AttendanceMonthlyExportSettingsResponse(BaseModel):
+    fixed_fields: list[AttendanceMonthlyExportField]
+    available_fields: list[AttendanceMonthlyExportField]
+    selected_fields: list[str]
+
+
+class AttendanceMonthlyExportSettingsUpdate(BaseModel):
+    selected_fields: list[str] = Field(default_factory=list)
+
+
 class AttendanceRecalculateRequest(BaseModel):
     year_month: str
-    user_id: Optional[str] = None
+    user_id: str | None = None
 
 
 class AttendanceRuleSettingsResponse(BaseModel):

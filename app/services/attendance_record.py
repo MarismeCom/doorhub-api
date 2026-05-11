@@ -1,17 +1,18 @@
-import calendar
 import asyncio
+import calendar
 import csv
 import io
+import zlib
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
-import zlib
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.zk_client import DEVICE_TIMEZONE
-from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, User
+from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, SystemUser, User
 from app.repositories.attendance import AttendanceDailyRepository
+from app.repositories.attendance_export_setting import AttendanceMonthlyExportSettingRepository
 from app.repositories.holiday_calendar import HolidayCalendarRepository
 from app.schemas import AttendanceMonthlySummaryResponse
 from app.services.workday import build_workday_provider
@@ -21,8 +22,28 @@ DEFAULT_PLAN_END = time(hour=18, minute=0)
 
 
 class AttendanceRecordService:
+    FIXED_EXPORT_FIELDS = (
+        {"key": "attend_date", "label": "日期"},
+    )
+    EXPORT_FIELDS = (
+        {"key": "day_type", "label": "日类型"},
+        {"key": "user_id", "label": "工号"},
+        {"key": "user_name", "label": "姓名"},
+        {"key": "plan_start", "label": "计划上班"},
+        {"key": "plan_end", "label": "计划下班"},
+        {"key": "actual_checkin", "label": "签到时间"},
+        {"key": "actual_checkout", "label": "签退时间"},
+        {"key": "late_minutes", "label": "迟到分钟"},
+        {"key": "early_minutes", "label": "早退分钟"},
+        {"key": "work_minutes", "label": "工时分钟"},
+        {"key": "overtime_minutes", "label": "加班分钟"},
+        {"key": "status", "label": "状态"},
+    )
+    DEFAULT_EXPORT_FIELD_KEYS = [item["key"] for item in EXPORT_FIELDS]
+
     def __init__(self):
         self.repository = AttendanceDailyRepository()
+        self.export_setting_repository = AttendanceMonthlyExportSettingRepository()
         self.holiday_repository = HolidayCalendarRepository()
         self.plan_start = DEFAULT_PLAN_START
         self.plan_end = DEFAULT_PLAN_END
@@ -302,53 +323,56 @@ class AttendanceRecordService:
         year_month: str,
         keyword: str | None = None,
         status: int | None = None,
+        current_user: SystemUser | None = None,
+        selected_fields: list[str] | None = None,
     ) -> bytes:
         await self.ensure_monthly_records(db, year_month, keyword=keyword)
         start_date, end_date = self.effective_year_month_range(year_month)
         records = await self.repository.list_all_records(db, start_date, end_date, keyword, status)
         holiday_rows = await self.holiday_repository.list_by_range(db, start_date, end_date)
         holiday_map = {row.holiday_date.isoformat(): row for row in holiday_rows}
+        export_fields = await self._resolve_export_fields(db, current_user, selected_fields)
 
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(
-            [
-                "日期",
-                "日类型",
-                "工号",
-                "姓名",
-                "计划上班",
-                "计划下班",
-                "实际签到",
-                "实际签退",
-                "迟到分钟",
-                "早退分钟",
-                "工时分钟",
-                "加班分钟",
-                "状态",
-            ]
-        )
+        writer.writerow([item["label"] for item in list(self.FIXED_EXPORT_FIELDS) + export_fields])
         for record in records:
             attend_date = record["attend_date"].isoformat()
-            writer.writerow(
-                [
-                    attend_date,
-                    self.day_type_label(attend_date, holiday_map),
-                    record["user_id"],
-                    record.get("user_name") or "",
-                    record.get("plan_start") or "",
-                    record.get("plan_end") or "",
-                    self._format_datetime(record.get("actual_checkin")),
-                    self._format_datetime(record.get("actual_checkout")),
-                    record.get("late_minutes") or 0,
-                    record.get("early_minutes") or 0,
-                    record.get("work_minutes") or 0,
-                    record.get("overtime_minutes") or 0,
-                    self.status_label(record.get("status")),
-                ]
-            )
+            row = [attend_date]
+            for field in export_fields:
+                row.append(self._format_export_value(field["key"], record, attend_date, holiday_map))
+            writer.writerow(row)
 
         return output.getvalue().encode("utf-8-sig")
+
+    async def get_monthly_export_settings(
+        self,
+        db: AsyncSession,
+        current_user: SystemUser,
+    ) -> dict:
+        saved_fields = await self._load_monthly_export_fields(db, current_user)
+        return {
+            "fixed_fields": list(self.FIXED_EXPORT_FIELDS),
+            "available_fields": list(self.EXPORT_FIELDS),
+            "selected_fields": saved_fields,
+        }
+
+    async def update_monthly_export_settings(
+        self,
+        db: AsyncSession,
+        current_user: SystemUser,
+        selected_fields: list[str],
+    ) -> dict:
+        normalized_fields = self._normalize_export_fields(selected_fields)
+        row = await self.export_setting_repository.get_or_create(db, current_user.id)
+        row.selected_fields = normalized_fields
+        await db.commit()
+        await db.refresh(row)
+        return {
+            "fixed_fields": list(self.FIXED_EXPORT_FIELDS),
+            "available_fields": list(self.EXPORT_FIELDS),
+            "selected_fields": normalized_fields,
+        }
 
     @staticmethod
     def status_label(value: int | None) -> str:
@@ -363,12 +387,100 @@ class AttendanceRecordService:
         }
         return mapping.get(value, f"未知({value})")
 
+    async def _resolve_export_fields(
+        self,
+        db: AsyncSession,
+        current_user: SystemUser | None,
+        selected_fields: list[str] | None,
+    ) -> list[dict]:
+        if selected_fields is not None:
+            normalized_fields = self._normalize_export_fields(selected_fields)
+            if current_user is not None:
+                row = await self.export_setting_repository.get_or_create(db, current_user.id)
+                row.selected_fields = normalized_fields
+                await db.commit()
+            return [item for item in self.EXPORT_FIELDS if item["key"] in normalized_fields]
+
+        if current_user is None:
+            return list(self.EXPORT_FIELDS)
+
+        saved_fields = await self._load_monthly_export_fields(db, current_user)
+        return [item for item in self.EXPORT_FIELDS if item["key"] in saved_fields]
+
+    async def _load_monthly_export_fields(self, db: AsyncSession, current_user: SystemUser) -> list[str]:
+        row = await self.export_setting_repository.get_by_user_id(db, current_user.id)
+        if row is None:
+            return list(self.DEFAULT_EXPORT_FIELD_KEYS)
+        normalized = self._normalize_export_fields(row.selected_fields)
+        if normalized != row.selected_fields:
+            row.selected_fields = normalized
+            await db.commit()
+        return normalized
+
+    def _normalize_export_fields(self, selected_fields: list[str] | None) -> list[str]:
+        if selected_fields is None:
+            return list(self.DEFAULT_EXPORT_FIELD_KEYS)
+
+        valid_keys = {item["key"] for item in self.EXPORT_FIELDS}
+        normalized: list[str] = []
+        for field in selected_fields:
+            key = str(field).strip()
+            if not key:
+                continue
+            if key not in valid_keys:
+                raise ValueError(f"不支持的导出字段: {key}")
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    def _format_export_value(
+        self,
+        field: str,
+        record: dict,
+        attend_date: str,
+        holiday_map: dict,
+    ) -> str:
+        match field:
+            case "day_type":
+                return self.day_type_label(attend_date, holiday_map)
+            case "user_id":
+                return record["user_id"]
+            case "user_name":
+                return record.get("user_name") or ""
+            case "plan_start":
+                return record.get("plan_start") or ""
+            case "plan_end":
+                return record.get("plan_end") or ""
+            case "actual_checkin":
+                return self._format_time_only(record.get("actual_checkin"))
+            case "actual_checkout":
+                return self._format_time_only(record.get("actual_checkout"))
+            case "late_minutes":
+                return str(record.get("late_minutes") or 0)
+            case "early_minutes":
+                return str(record.get("early_minutes") or 0)
+            case "work_minutes":
+                return str(record.get("work_minutes") or 0)
+            case "overtime_minutes":
+                return str(record.get("overtime_minutes") or 0)
+            case "status":
+                return self.status_label(record.get("status"))
+            case _:
+                raise ValueError(f"不支持的导出字段: {field}")
+
     @staticmethod
     def _format_datetime(value: datetime | None) -> str:
         if not value:
             return ""
         localized = AttendanceRecordService._to_local_timestamp(value)
         return localized.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _format_time_only(value: datetime | None) -> str:
+        if not value:
+            return ""
+        localized = AttendanceRecordService._to_local_timestamp(value)
+        return localized.strftime("%H:%M:%S")
 
     @staticmethod
     def _parse_time(value: str, default: time) -> time:
