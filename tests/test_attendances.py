@@ -1,4 +1,6 @@
-from datetime import date, datetime, timedelta, timezone
+import csv
+import io
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -7,15 +9,22 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.attendance_sync_manager import AttendanceSyncManager
 from app.core.config import get_settings
 from app.core.zk_client import DEVICE_TIMEZONE, ZKClient, decode_zk_time, encode_zk_time
 from app.db.base import Base
 from app.db.session import build_async_database_url
-from app.core.attendance_sync_manager import AttendanceSyncManager
-from app.models import Attendance, AttendanceDaily, AttendanceRuleSetting, AttendanceSyncSetting, User
+from app.models import (
+    Attendance,
+    AttendanceDaily,
+    AttendanceRuleSetting,
+    AttendanceSyncSetting,
+    SystemUser,
+    User,
+)
 from app.repositories.attendance import AttendanceRepository
-from app.services.attendance_record import AttendanceRecordService
 from app.services.attendance import AttendanceService
+from app.services.attendance_record import AttendanceRecordService
 
 
 def attendance_record(user_id: str, timestamp: datetime, status: int = 0, punch: int = 0, uid: int = 1):
@@ -68,7 +77,7 @@ def test_decode_attendance_time_uses_xface600_time_logic():
 
 
 def test_export_datetime_formats_use_device_local_timezone():
-    formatted = AttendanceRecordService._format_datetime(datetime(2026, 4, 28, 23, 20, 16, tzinfo=timezone.utc))
+    formatted = AttendanceRecordService._format_datetime(datetime(2026, 4, 28, 23, 20, 16, tzinfo=UTC))
 
     assert formatted == "2026-04-29 07:20:16"
 
@@ -748,6 +757,78 @@ async def test_export_monthly_csv_includes_overtime_status_and_duration_for_week
 
     assert "加班" in csv_text
     assert "651" in csv_text
+
+
+@pytest.mark.asyncio
+async def test_monthly_export_settings_default_to_all_fields_when_missing(db_session):
+    db_session.add(SystemUser(username="operator", password_hash="x", role="admin", is_active=True))
+    await db_session.commit()
+    current_user = (await db_session.execute(select(SystemUser).where(SystemUser.username == "operator"))).scalar_one()
+
+    service = AttendanceRecordService()
+    settings = await service.get_monthly_export_settings(db_session, current_user)
+
+    assert settings["fixed_fields"] == [{"key": "attend_date", "label": "日期"}]
+    assert [item["key"] for item in settings["available_fields"]] == [
+        "day_type",
+        "user_id",
+        "user_name",
+        "plan_start",
+        "plan_end",
+        "actual_checkin",
+        "actual_checkout",
+        "late_minutes",
+        "early_minutes",
+        "work_minutes",
+        "overtime_minutes",
+        "status",
+    ]
+    assert settings["selected_fields"] == [item["key"] for item in settings["available_fields"]]
+
+
+@pytest.mark.asyncio
+async def test_monthly_export_saves_selected_fields_and_formats_times_without_dates(db_session):
+    db_session.add(SystemUser(username="operator", password_hash="x", role="admin", is_active=True))
+    await db_session.commit()
+    current_user = (await db_session.execute(select(SystemUser).where(SystemUser.username == "operator"))).scalar_one()
+
+    service = AttendanceRecordService()
+    service.ensure_monthly_records = AsyncMock()
+    service.repository.list_all_records = AsyncMock(
+        return_value=[
+            {
+                "attend_date": datetime(2026, 3, 14).date(),
+                "user_id": "70",
+                "user_name": "Export Weekend",
+                "plan_start": "10:00",
+                "plan_end": "18:00",
+                "actual_checkin": datetime(2026, 3, 14, 8, 7, 34, tzinfo=DEVICE_TIMEZONE),
+                "actual_checkout": datetime(2026, 3, 14, 18, 58, 40, tzinfo=DEVICE_TIMEZONE),
+                "late_minutes": 0,
+                "early_minutes": 0,
+                "work_minutes": 651,
+                "overtime_minutes": 651,
+                "status": 7,
+            }
+        ]
+    )
+    service.holiday_repository.list_by_range = AsyncMock(return_value=[])
+
+    content = await service.export_monthly_csv(
+        db_session,
+        "2026-03",
+        keyword="70",
+        current_user=current_user,
+        selected_fields=["user_id", "actual_checkin", "actual_checkout", "status"],
+    )
+    csv_rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+    saved = await service.get_monthly_export_settings(db_session, current_user)
+
+    assert csv_rows[0] == ["日期", "工号", "签到时间", "签退时间", "状态"]
+    assert csv_rows[1][0] == "2026-03-14"
+    assert csv_rows[1][2] == "08:07:34"
+    assert csv_rows[1][3] == "18:58:40"
+    assert saved["selected_fields"] == ["user_id", "actual_checkin", "actual_checkout", "status"]
 
 
 @pytest.mark.asyncio
